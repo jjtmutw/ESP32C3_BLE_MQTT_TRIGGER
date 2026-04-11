@@ -3,8 +3,12 @@
 !.env.example
 .pio/
 .vscode/
+.venv/
+venv/
+.cache/
+__pycache__/
+*.pyc
 dist/
 build/
 node_modules/
 compile_commands.json
-
