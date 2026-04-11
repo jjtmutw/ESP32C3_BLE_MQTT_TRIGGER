@@ -1,0 +1,10 @@
+.env
+.env.*
+!.env.example
+.pio/
+.vscode/
+dist/
+build/
+node_modules/
+compile_commands.json
+
