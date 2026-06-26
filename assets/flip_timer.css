@@ -121,7 +121,7 @@ button {
   display: grid;
   place-items: center;
   height: clamp(110px, 24.5vw, 268px);
-  aspect-ratio: 0.68;
+  aspect-ratio: 0.612;
   border-radius: clamp(8px, 1.4vw, 17px);
   background: linear-gradient(180deg, var(--card-top) 0 49%, var(--card-bottom) 50% 100%);
   box-shadow:
@@ -156,6 +156,7 @@ button {
   position: relative;
   z-index: 1;
   color: var(--text);
+  font-family: "Microsoft JhengHei", "Noto Sans TC", "PingFang TC", "Heiti TC", "Arial Black", sans-serif;
   font-size: clamp(92px, 20.6vw, 222px);
   line-height: 0.86;
   font-weight: 950;
