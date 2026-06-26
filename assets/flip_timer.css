@@ -121,7 +121,7 @@ button {
   display: grid;
   place-items: center;
   height: clamp(110px, 24.5vw, 268px);
-  aspect-ratio: 0.551;
+  aspect-ratio: 0.496;
   border-radius: clamp(8px, 1.4vw, 17px);
   background: linear-gradient(180deg, var(--card-top) 0 49%, var(--card-bottom) 50% 100%);
   box-shadow:
@@ -156,18 +156,22 @@ button {
   position: relative;
   z-index: 1;
   color: var(--text);
-  font-family: "Arial Black", Arial, "Helvetica Neue", Helvetica, sans-serif;
-  font-size: clamp(92px, 20.6vw, 222px);
+  font-family: "Arial Narrow", "Aptos Narrow", "Roboto Condensed", "Helvetica Neue", Arial, sans-serif;
+  font-size: clamp(86px, 19.2vw, 208px);
   line-height: 0.86;
-  font-weight: 950;
+  font-weight: 900;
+  font-stretch: condensed;
   font-variant-numeric: tabular-nums;
+  transform: scaleX(0.88);
+  transform-origin: center;
   text-shadow:
     0 2px 2px rgba(255, 255, 255, 0.08),
+    0 1px 0 rgba(210, 210, 210, 0.3),
     0 5px 7px rgba(0, 0, 0, 0.72);
 }
 
 .flip-card.centi .flip-digit {
-  font-size: clamp(82px, 18vw, 196px);
+  font-size: clamp(76px, 16.7vw, 184px);
 }
 
 .flip-separator {
