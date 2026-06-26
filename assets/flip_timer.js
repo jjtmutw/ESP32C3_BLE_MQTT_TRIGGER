@@ -143,20 +143,51 @@ function connectMqtt() {
 }
 
 async function requestFullscreen() {
-  if (document.fullscreenElement) return;
+  const root = document.documentElement;
+  const fullscreenElement =
+    document.fullscreenElement || document.webkitFullscreenElement;
+
   try {
-    await document.documentElement.requestFullscreen({ navigationUI: "hide" });
+    if (fullscreenElement) {
+      if (document.exitFullscreen) {
+        await document.exitFullscreen();
+      } else if (document.webkitExitFullscreen) {
+        document.webkitExitFullscreen();
+      }
+      return;
+    }
+
+    if (root.requestFullscreen) {
+      await root.requestFullscreen({ navigationUI: "hide" });
+    } else if (root.webkitRequestFullscreen) {
+      root.webkitRequestFullscreen();
+    } else {
+      document.documentElement.classList.toggle("fullscreen-fallback");
+    }
+
     if (screen.orientation?.lock) await screen.orientation.lock("landscape");
   } catch {
-    // Fullscreen and orientation lock require browser support and a user gesture.
+    document.documentElement.classList.toggle("fullscreen-fallback");
   }
 }
 
+function updateFullscreenButton() {
+  const active =
+    document.fullscreenElement ||
+    document.webkitFullscreenElement ||
+    document.documentElement.classList.contains("fullscreen-fallback");
+  els.fullscreenButton.textContent = active ? "Exit" : "Fullscreen";
+}
+
 els.fullscreenButton.addEventListener("click", requestFullscreen);
+document.addEventListener("fullscreenchange", updateFullscreenButton);
+document.addEventListener("webkitfullscreenchange", updateFullscreenButton);
 document.addEventListener("keydown", (event) => {
   if (event.code === "Space") toggleTiming();
+  if (event.code === "KeyF") requestFullscreen();
 });
 
 renderDigits(true);
+updateFullscreenButton();
 frame();
 connectMqtt();
