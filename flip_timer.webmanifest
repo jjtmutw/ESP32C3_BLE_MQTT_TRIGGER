@@ -1,0 +1,19 @@
+{
+  "name": "MQTT Flip Timer",
+  "short_name": "Flip Timer",
+  "description": "MQTT controlled flip-style timer for button1 payload timing.",
+  "start_url": "./flip_timer.html",
+  "scope": "./",
+  "display": "fullscreen",
+  "orientation": "landscape",
+  "background_color": "#202020",
+  "theme_color": "#202020",
+  "icons": [
+    {
+      "src": "flip_timer_icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
