@@ -45,6 +45,11 @@ body {
   z-index: 4;
 }
 
+.is-standalone .fullscreen-button {
+  opacity: 0;
+  pointer-events: none;
+}
+
 button {
   font: inherit;
 }
