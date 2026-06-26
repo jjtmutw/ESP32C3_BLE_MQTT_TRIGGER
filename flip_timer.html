@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#202020">
+  <meta name="color-scheme" content="dark">
+  <title>MQTT Flip Timer</title>
+  <link rel="stylesheet" href="assets/flip_timer.css">
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+  <script src="flip_timer_config.js"></script>
+</head>
+<body>
+  <div class="design-credit">Design by PJJ</div>
+  <div class="connection-status" id="connectionStatus">Offline</div>
+  <button class="fullscreen-button" id="fullscreenButton" type="button">Fullscreen</button>
+
+  <main class="timer-shell">
+    <section class="timer-stage" aria-label="MQTT flip timer">
+      <div class="timer-title" id="timerTitle">MQTT Flip Timer</div>
+      <div class="flip-row" aria-label="elapsed time in minutes, seconds, centiseconds">
+        <div class="flip-card" data-digit="0"><span class="flip-digit">0</span></div>
+        <div class="flip-card" data-digit="1"><span class="flip-digit">0</span></div>
+        <div class="flip-separator colon" aria-hidden="true"><span></span><span></span></div>
+        <div class="flip-card" data-digit="2"><span class="flip-digit">0</span></div>
+        <div class="flip-card" data-digit="3"><span class="flip-digit">0</span></div>
+        <div class="flip-separator dot" aria-hidden="true"><span></span></div>
+        <div class="flip-card centi" data-digit="4"><span class="flip-digit">0</span></div>
+        <div class="flip-card centi" data-digit="5"><span class="flip-digit">0</span></div>
+      </div>
+      <div class="timer-message" id="timerMessage">Waiting for button1 pressed</div>
+    </section>
+  </main>
+
+  <script src="assets/flip_timer.js"></script>
+</body>
+</html>
