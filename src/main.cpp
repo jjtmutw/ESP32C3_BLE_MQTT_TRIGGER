@@ -11,13 +11,14 @@
 namespace {
 
 constexpr char DEVICE_NAME[] = "ESP32C3-BLE-MQTT";
-constexpr char DEFAULT_DEVICE_ID[] = "oWvWIn0N";
+constexpr char DEFAULT_DEVICE_ID[] = "OY9LRGbg";
 constexpr char HID_SERVICE_UUID[] = "1812";
 
 constexpr uint8_t OLED_I2C_ADDRESS = 0x3C;
 constexpr uint8_t DISPLAY_I2C_SDA_PIN = 5;
 constexpr uint8_t DISPLAY_I2C_SCL_PIN = 6;
 constexpr uint8_t BOOT_BUTTON_PIN = 9;
+constexpr uint8_t PRESS_LED_PIN = 8;
 
 constexpr unsigned long WIFI_CONNECT_WAIT_MS = 15000;
 constexpr unsigned long MQTT_RETRY_MS = 5000;
@@ -26,6 +27,8 @@ constexpr unsigned long DISPLAY_REFRESH_MS = 300;
 constexpr unsigned long STATUS_ROTATE_MS = 2500;
 constexpr unsigned long HEARTBEAT_MS = 10000;
 constexpr unsigned long BUTTON_HOLD_FOR_PORTAL_MS = 4000;
+constexpr unsigned long PRESS_LED_PULSE_MS = 120;
+constexpr unsigned long GPIO_BUTTON_DEBOUNCE_MS = 30;
 
 constexpr char DEFAULT_MQTT_HOST[] = "broker.emqx.io";
 constexpr uint16_t DEFAULT_MQTT_PORT = 1883;
@@ -49,6 +52,7 @@ constexpr char KEY_COOLDOWN[] = "cooldown";
 
 constexpr size_t BUTTON_COUNT = 3;
 const char *BUTTON_LABELS[BUTTON_COUNT] = {"button1", "button2", "button3"};
+const uint8_t GPIO_BUTTON_PINS[BUTTON_COUNT] = {0, 1, 2};
 
 struct AppConfig {
   String mqttHost;
@@ -75,6 +79,13 @@ struct ButtonSlot {
   String lastReportHex = "";
 };
 
+struct GpioButtonState {
+  bool rawPressed = false;
+  bool stablePressed = false;
+  bool pressLatched = false;
+  unsigned long lastRawChangeMs = 0;
+};
+
 Preferences prefs;
 WiFiClient wifiClient;
 PubSubClient mqttClient(wifiClient);
@@ -82,12 +93,14 @@ U8G2_SSD1306_72X40_ER_F_HW_I2C display(U8G2_R0, U8X8_PIN_NONE);
 NimBLEScan *bleScan = nullptr;
 AppConfig config;
 ButtonSlot buttons[BUTTON_COUNT];
+GpioButtonState gpioButtons[BUTTON_COUNT];
 
 unsigned long lastMqttAttemptMs = 0;
 unsigned long lastDisplayRefreshMs = 0;
 unsigned long lastStatusRotateMs = 0;
 unsigned long lastHeartbeatMs = 0;
 unsigned long bootButtonDownMs = 0;
+unsigned long pressLedOffAtMs = 0;
 bool bootButtonWasPressed = false;
 bool portalRequested = false;
 bool mqttWasConnected = false;
@@ -145,8 +158,38 @@ String defaultTopic() {
   return String("jj/ble/button/") + config.deviceId;
 }
 
+String displayTopicSuffix() {
+  return config.deviceId;
+}
+
 String makePressedPayload(const String &buttonLabel) {
   return String("{\"") + buttonLabel + "\":\"pressed\"}";
+}
+
+void pulsePressLed() {
+  digitalWrite(PRESS_LED_PIN, LOW);
+  pressLedOffAtMs = millis() + PRESS_LED_PULSE_MS;
+}
+
+void updatePressLed() {
+  if (pressLedOffAtMs && static_cast<long>(millis() - pressLedOffAtMs) >= 0) {
+    digitalWrite(PRESS_LED_PIN, HIGH);
+    pressLedOffAtMs = 0;
+  }
+}
+
+void initGpioButtons() {
+  for (size_t i = 0; i < BUTTON_COUNT; ++i) {
+    pinMode(GPIO_BUTTON_PINS[i], INPUT_PULLUP);
+    const bool pressed = digitalRead(GPIO_BUTTON_PINS[i]) == LOW;
+    gpioButtons[i].rawPressed = pressed;
+    gpioButtons[i].stablePressed = pressed;
+    gpioButtons[i].pressLatched = pressed;
+    gpioButtons[i].lastRawChangeMs = millis();
+    Serial.printf("[%10lu] GPIO button init: %s pin=%u state=%s\n", millis(),
+                  BUTTON_LABELS[i], GPIO_BUTTON_PINS[i],
+                  pressed ? "PRESSED" : "released");
+  }
 }
 
 void logLine(const String &message) {
@@ -292,7 +335,7 @@ void refreshDisplay(bool force = false) {
   display.setFont(u8g2_font_5x8_tr);
   if (statusPage == 0) {
     display.drawStr(0, 23, "Topic");
-    display.drawUTF8(0, 33, defaultTopic().c_str());
+    display.drawUTF8(0, 33, displayTopicSuffix().c_str());
     display.drawUTF8(0, 40, buttonSummaryLine().c_str());
   } else {
     display.drawStr(0, 23, "Last");
@@ -373,9 +416,46 @@ bool publishButtonPress(ButtonSlot &button, const String &sourceSummary) {
   button.lastPublishMs = now;
   lastSeenSummary = sourceSummary;
   lastPublishSummary = ok ? "MQTT sent" : "Publish fail";
-  Serial.printf("BLE trigger: %s -> %s | %s | result=%s\n", sourceSummary.c_str(),
+  Serial.printf("MQTT trigger: %s -> %s | %s | result=%s\n", sourceSummary.c_str(),
                 topic.c_str(), payload.c_str(), ok ? "OK" : "FAIL");
   return ok;
+}
+
+void pollGpioButtons() {
+  const unsigned long now = millis();
+  for (size_t i = 0; i < BUTTON_COUNT; ++i) {
+    GpioButtonState &state = gpioButtons[i];
+    const bool rawPressed = digitalRead(GPIO_BUTTON_PINS[i]) == LOW;
+
+    if (rawPressed != state.rawPressed) {
+      state.rawPressed = rawPressed;
+      state.lastRawChangeMs = now;
+    }
+
+    if (now - state.lastRawChangeMs < GPIO_BUTTON_DEBOUNCE_MS) continue;
+    if (rawPressed == state.stablePressed) continue;
+
+    state.stablePressed = rawPressed;
+    ButtonSlot &button = buttons[i];
+
+    if (!state.stablePressed) {
+      state.pressLatched = false;
+      lastSeenSummary = button.label + ":gpio up";
+      lastPublishSummary = "GPIO up";
+      Serial.printf("[%10lu] GPIO release detected: %s pin=%u\n", now,
+                    button.label.c_str(), GPIO_BUTTON_PINS[i]);
+      continue;
+    }
+
+    if (state.pressLatched) continue;
+
+    state.pressLatched = true;
+    pulsePressLed();
+    const String sourceSummary = button.label + ":gpio";
+    Serial.printf("[%10lu] GPIO press detected: %s pin=%u\n", now,
+                  button.label.c_str(), GPIO_BUTTON_PINS[i]);
+    publishButtonPress(button, sourceSummary);
+  }
 }
 
 int buttonIndexFromClient(NimBLEClient *client) {
@@ -426,6 +506,7 @@ void onHidReport(NimBLERemoteCharacteristic *characteristic, uint8_t *data,
   }
 
   button.pressLatched = true;
+  pulsePressLed();
   publishButtonPress(button, button.label + ":" + payloadHex);
 }
 
@@ -823,6 +904,9 @@ void setup() {
   initButtonSlots();
 
   pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);
+  pinMode(PRESS_LED_PIN, OUTPUT);
+  digitalWrite(PRESS_LED_PIN, HIGH);
+  initGpioButtons();
   Wire.begin(DISPLAY_I2C_SDA_PIN, DISPLAY_I2C_SCL_PIN);
   display.setI2CAddress(OLED_I2C_ADDRESS << 1);
   display.begin();
@@ -858,6 +942,7 @@ void setup() {
 }
 
 void loop() {
+  updatePressLed();
   pollPortalButton();
   if (portalRequested) {
     portalRequested = false;
@@ -877,6 +962,7 @@ void loop() {
     mqttClient.loop();
   }
 
+  pollGpioButtons();
   ensureBleConnections();
   heartbeatLog();
   refreshDisplay();
