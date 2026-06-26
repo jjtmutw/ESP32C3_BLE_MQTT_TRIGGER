@@ -172,11 +172,33 @@ async function requestFullscreen() {
 }
 
 function updateFullscreenButton() {
+  if (isStandaloneDisplay()) {
+    els.fullscreenButton.textContent = "Fullscreen";
+    return;
+  }
+
   const active =
     document.fullscreenElement ||
     document.webkitFullscreenElement ||
     document.documentElement.classList.contains("fullscreen-fallback");
   els.fullscreenButton.textContent = active ? "Exit" : "Fullscreen";
+}
+
+function isStandaloneDisplay() {
+  return window.matchMedia("(display-mode: standalone)").matches ||
+    window.matchMedia("(display-mode: fullscreen)").matches ||
+    window.navigator.standalone === true;
+}
+
+function setupPwaMode() {
+  if (isStandaloneDisplay()) {
+    document.documentElement.classList.add("is-standalone");
+  }
+}
+
+function registerServiceWorker() {
+  if (!("serviceWorker" in navigator)) return;
+  navigator.serviceWorker.register("flip_timer_service_worker.js").catch(() => {});
 }
 
 els.fullscreenButton.addEventListener("click", requestFullscreen);
@@ -188,6 +210,8 @@ document.addEventListener("keydown", (event) => {
 });
 
 renderDigits(true);
+setupPwaMode();
 updateFullscreenButton();
+registerServiceWorker();
 frame();
 connectMqtt();
