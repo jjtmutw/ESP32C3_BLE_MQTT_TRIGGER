@@ -11,6 +11,8 @@ const els = {
 
 const state = {
   client: null,
+  mqttUrlIndex: 0,
+  mqttRetryTimer: 0,
   running: false,
   startedAt: 0,
   elapsedBeforeRun: 0,
@@ -18,8 +20,23 @@ const state = {
   animationId: 0
 };
 
-function mqttUrl() {
-  return config.MQTT_WS_URL || `wss://${config.DEFAULT_MQTT_HOST || "broker.emqx.io"}:8084/mqtt`;
+function mqttUrls() {
+  if (Array.isArray(config.MQTT_WS_URLS) && config.MQTT_WS_URLS.length) {
+    return config.MQTT_WS_URLS;
+  }
+  if (config.MQTT_WS_URL) return [config.MQTT_WS_URL];
+  const host = config.DEFAULT_MQTT_HOST || "broker.emqx.io";
+  return [
+    `wss://${host}:8084/mqtt`,
+    `wss://${host}:8084`,
+    `ws://${host}:8083/mqtt`,
+    `ws://${host}:8083`
+  ];
+}
+
+function currentMqttUrl() {
+  const urls = mqttUrls();
+  return urls[state.mqttUrlIndex % urls.length];
 }
 
 function mqttTopic() {
@@ -43,6 +60,14 @@ function setStatus(mode, text) {
   els.status.classList.toggle("online", mode === "online");
   els.status.classList.toggle("error", mode === "error");
   els.status.textContent = text;
+}
+
+function scheduleMqttReconnect(reason = "Reconnect") {
+  window.clearTimeout(state.mqttRetryTimer);
+  const urls = mqttUrls();
+  state.mqttUrlIndex = (state.mqttUrlIndex + 1) % urls.length;
+  setStatus("idle", `${reason} ${state.mqttUrlIndex + 1}/${urls.length}`);
+  state.mqttRetryTimer = window.setTimeout(connectMqtt, 1800);
 }
 
 function setMode(mode, text) {
@@ -114,6 +139,7 @@ function handleMqttMessage(message) {
 
 function connectMqtt() {
   els.title.textContent = mqttTopic();
+  window.clearTimeout(state.mqttRetryTimer);
 
   if (!window.mqtt) {
     setStatus("error", "MQTT CDN Failed");
@@ -121,25 +147,53 @@ function connectMqtt() {
     return;
   }
 
-  state.client = mqtt.connect(mqttUrl(), {
-    clientId: `flip_timer_${Math.random().toString(16).slice(2, 10)}`,
-    username: config.DEFAULT_MQTT_USER || undefined,
-    password: config.DEFAULT_MQTT_PASS || undefined,
-    reconnectPeriod: 2500,
-    connectTimeout: 8000,
-    clean: true
-  });
+  if (state.client) {
+    state.client.end(true);
+    state.client = null;
+  }
 
-  state.client.on("connect", () => {
+  const url = currentMqttUrl();
+  const options = {
+    clientId: `flip_timer_${Math.random().toString(16).slice(2, 10)}`,
+    reconnectPeriod: 0,
+    connectTimeout: 9000,
+    clean: true,
+    keepalive: 45,
+    protocolVersion: 4
+  };
+
+  if (config.DEFAULT_MQTT_USER) options.username = config.DEFAULT_MQTT_USER;
+  if (config.DEFAULT_MQTT_PASS) options.password = config.DEFAULT_MQTT_PASS;
+
+  setStatus("idle", `Connecting ${state.mqttUrlIndex + 1}/${mqttUrls().length}`);
+  state.client = mqtt.connect(url, options);
+  const client = state.client;
+
+  client.on("connect", () => {
+    if (client !== state.client) return;
     setStatus("online", "Online");
-    state.client.subscribe(mqttTopic(), { qos: 0 });
+    client.subscribe(mqttTopic(), { qos: 0 });
     setMode(state.running ? "running" : "idle", "Waiting for button1 pressed");
   });
 
-  state.client.on("message", (_topic, message) => handleMqttMessage(message));
-  state.client.on("reconnect", () => setStatus("idle", "Reconnecting"));
-  state.client.on("close", () => setStatus("idle", "Offline"));
-  state.client.on("error", () => setStatus("error", "Error"));
+  client.on("message", (_topic, message) => {
+    if (client !== state.client) return;
+    handleMqttMessage(message);
+  });
+  client.on("close", () => {
+    if (client !== state.client) return;
+    scheduleMqttReconnect("Closed");
+  });
+  client.on("offline", () => {
+    if (client !== state.client) return;
+    setStatus("idle", "Offline");
+  });
+  client.on("error", (error) => {
+    if (client !== state.client) return;
+    const message = error?.message ? error.message.slice(0, 28) : "MQTT Error";
+    setStatus("error", message);
+    client.end(true);
+  });
 }
 
 async function requestFullscreen() {
