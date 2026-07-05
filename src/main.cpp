@@ -12,6 +12,7 @@ namespace {
 
 constexpr char DEVICE_NAME[] = "ESP32C3-BLE-MQTT";
 constexpr char DEFAULT_DEVICE_ID[] = "OY9LRGbg";
+constexpr char PREVIOUS_DEFAULT_DEVICE_ID[] = "oWvWIn0N";
 constexpr char HID_SERVICE_UUID[] = "1812";
 
 constexpr uint8_t OLED_I2C_ADDRESS = 0x3C;
@@ -21,8 +22,10 @@ constexpr uint8_t BOOT_BUTTON_PIN = 9;
 constexpr uint8_t PRESS_LED_PIN = 8;
 
 constexpr unsigned long WIFI_CONNECT_WAIT_MS = 15000;
+constexpr unsigned long WIFI_RETRY_MS = 10000;
 constexpr unsigned long MQTT_RETRY_MS = 5000;
-constexpr unsigned long BLE_CONNECT_RETRY_MS = 4000;
+constexpr unsigned long BLE_CONNECT_RETRY_MS = 2000;
+constexpr unsigned long BLE_KEEPALIVE_MS = 30000;
 constexpr unsigned long DISPLAY_REFRESH_MS = 300;
 constexpr unsigned long STATUS_ROTATE_MS = 2500;
 constexpr unsigned long HEARTBEAT_MS = 10000;
@@ -74,7 +77,9 @@ struct ButtonSlot {
   bool subscribed = false;
   bool connecting = false;
   bool pressLatched = false;
+  bool addressKnown = false;
   unsigned long lastConnectAttemptMs = 0;
+  unsigned long lastKeepAliveMs = 0;
   unsigned long lastPublishMs = 0;
   String lastReportHex = "";
 };
@@ -89,7 +94,7 @@ struct GpioButtonState {
 Preferences prefs;
 WiFiClient wifiClient;
 PubSubClient mqttClient(wifiClient);
-U8G2_SSD1306_72X40_ER_F_HW_I2C display(U8G2_R0, U8X8_PIN_NONE);
+U8G2_SSD1306_72X40_ER_F_HW_I2C display(U8G2_R2, U8X8_PIN_NONE);
 NimBLEScan *bleScan = nullptr;
 AppConfig config;
 ButtonSlot buttons[BUTTON_COUNT];
@@ -99,11 +104,14 @@ unsigned long lastMqttAttemptMs = 0;
 unsigned long lastDisplayRefreshMs = 0;
 unsigned long lastStatusRotateMs = 0;
 unsigned long lastHeartbeatMs = 0;
+unsigned long lastWifiAttemptMs = 0;
+unsigned long wifiAttemptStartedMs = 0;
 unsigned long bootButtonDownMs = 0;
 unsigned long pressLedOffAtMs = 0;
 bool bootButtonWasPressed = false;
 bool portalRequested = false;
 bool mqttWasConnected = false;
+bool wifiConnectInProgress = false;
 bool bleScanStarted = false;
 uint8_t statusPage = 0;
 String lastSeenSummary = "No BLE target";
@@ -162,20 +170,27 @@ String displayTopicSuffix() {
   return config.deviceId;
 }
 
+String displayTopicLine() {
+  return String("Topic ") + displayTopicSuffix();
+}
+
 String makePressedPayload(const String &buttonLabel) {
   return String("{\"") + buttonLabel + "\":\"pressed\"}";
 }
 
 void pulsePressLed() {
-  digitalWrite(PRESS_LED_PIN, LOW);
+  digitalWrite(PRESS_LED_PIN, HIGH);
   pressLedOffAtMs = millis() + PRESS_LED_PULSE_MS;
 }
 
 void updatePressLed() {
-  if (pressLedOffAtMs && static_cast<long>(millis() - pressLedOffAtMs) >= 0) {
+  if (pressLedOffAtMs && static_cast<long>(millis() - pressLedOffAtMs) < 0) {
     digitalWrite(PRESS_LED_PIN, HIGH);
-    pressLedOffAtMs = 0;
+    return;
   }
+
+  pressLedOffAtMs = 0;
+  digitalWrite(PRESS_LED_PIN, mqttClient.connected() ? LOW : HIGH);
 }
 
 void initGpioButtons() {
@@ -215,10 +230,12 @@ void applyConfigToButtonSlots() {
   for (size_t i = 0; i < BUTTON_COUNT; ++i) {
     buttons[i].configuredMac = config.buttonMacs[i];
     buttons[i].targetSeen = false;
+    buttons[i].addressKnown = buttons[i].client && buttons[i].client->isConnected();
     buttons[i].connected = buttons[i].client && buttons[i].client->isConnected();
     buttons[i].subscribed = false;
     buttons[i].connecting = false;
     buttons[i].pressLatched = false;
+    buttons[i].lastKeepAliveMs = 0;
     buttons[i].lastReportHex = "";
   }
 }
@@ -254,6 +271,9 @@ void loadConfig() {
   config.mqttUser = trimCopy(config.mqttUser);
   config.mqttPass = trimCopy(config.mqttPass);
   config.deviceId = trimCopy(config.deviceId);
+  if (config.deviceId == PREVIOUS_DEFAULT_DEVICE_ID) {
+    config.deviceId = DEFAULT_DEVICE_ID;
+  }
   for (size_t i = 0; i < BUTTON_COUNT; ++i) {
     config.buttonMacs[i] = normalizeUpperNoSpace(config.buttonMacs[i]);
   }
@@ -304,9 +324,12 @@ void drawWifiBars(int x, int baselineY, int bars) {
 void drawStatusBar() {
   drawWifiBars(0, 10, wifiBars());
   display.setFont(u8g2_font_4x6_tr);
-  display.drawStr(22, 8, WiFi.status() == WL_CONNECTED ? "WIFI" : "NOWIFI");
+  bool bleConnected = false;
+  for (size_t i = 0; i < BUTTON_COUNT; ++i) {
+    bleConnected = bleConnected || buttons[i].connected;
+  }
+  display.drawStr(22, 8, bleConnected ? "BLE" : "BLE..");
   display.drawStr(48, 8, mqttClient.connected() ? "MQTT" : "MQ..");
-  display.drawStr(84, 8, bleConnectionSummary.c_str());
   display.drawHLine(0, 12, 72);
 }
 
@@ -314,8 +337,6 @@ String buttonSummaryLine() {
   String summary;
   for (size_t i = 0; i < BUTTON_COUNT; ++i) {
     if (summary.length()) summary += " ";
-    summary += buttons[i].label;
-    summary += ":";
     summary += buttons[i].connected ? "UP" : (buttons[i].configuredMac.length() ? ".." : "--");
   }
   return summary;
@@ -334,8 +355,7 @@ void refreshDisplay(bool force = false) {
   drawStatusBar();
   display.setFont(u8g2_font_5x8_tr);
   if (statusPage == 0) {
-    display.drawStr(0, 23, "Topic");
-    display.drawUTF8(0, 33, displayTopicSuffix().c_str());
+    display.drawUTF8(0, 28, displayTopicLine().c_str());
     display.drawUTF8(0, 40, buttonSummaryLine().c_str());
   } else {
     display.drawStr(0, 23, "Last");
@@ -347,17 +367,51 @@ void refreshDisplay(bool force = false) {
 
 void connectWifiBlocking() {
   WiFi.mode(WIFI_STA);
+  WiFi.persistent(true);
   Serial.printf("[%10lu] WiFi begin: using saved credentials\n", millis());
   WiFi.begin();
+  wifiConnectInProgress = true;
+  wifiAttemptStartedMs = millis();
+  lastWifiAttemptMs = wifiAttemptStartedMs;
   const unsigned long started = millis();
   while (WiFi.status() != WL_CONNECTED &&
          millis() - started < WIFI_CONNECT_WAIT_MS) {
     refreshDisplay(true);
     delay(50);
   }
+  wifiConnectInProgress = WiFi.status() != WL_CONNECTED;
   Serial.printf("[%10lu] WiFi wait done: status=%d connected=%s\n", millis(),
                 static_cast<int>(WiFi.status()),
                 WiFi.status() == WL_CONNECTED ? "YES" : "NO");
+}
+
+void serviceWifiConnection() {
+  if (WiFi.status() == WL_CONNECTED) {
+    wifiConnectInProgress = false;
+    return;
+  }
+
+  const unsigned long now = millis();
+  if (wifiConnectInProgress &&
+      now - wifiAttemptStartedMs < WIFI_CONNECT_WAIT_MS) {
+    return;
+  }
+
+  if (wifiConnectInProgress) {
+    Serial.printf("[%10lu] WiFi attempt timed out, will retry\n", now);
+    wifiConnectInProgress = false;
+  }
+
+  if (lastWifiAttemptMs && now - lastWifiAttemptMs < WIFI_RETRY_MS) return;
+
+  WiFi.mode(WIFI_STA);
+  WiFi.persistent(true);
+  Serial.printf("[%10lu] WiFi retry: using saved credentials\n", now);
+  WiFi.begin();
+  wifiConnectInProgress = true;
+  wifiAttemptStartedMs = now;
+  lastWifiAttemptMs = now;
+  lastPublishSummary = "WiFi retry";
 }
 
 bool connectMqtt() {
@@ -517,6 +571,8 @@ public:
     if (index >= 0) {
       buttons[index].connected = true;
       buttons[index].connecting = false;
+      buttons[index].addressKnown = true;
+      buttons[index].lastKeepAliveMs = millis();
       bleConnectionSummary = buttons[index].label + ":UP";
       Serial.printf("[%10lu] BLE connected: %s peer=%s mtu=%u\n", millis(),
                     buttons[index].label.c_str(),
@@ -530,7 +586,6 @@ public:
       buttons[index].connected = false;
       buttons[index].subscribed = false;
       buttons[index].connecting = false;
-      buttons[index].targetSeen = false;
       buttons[index].pressLatched = false;
       bleConnectionSummary = buttons[index].label + ":scan";
       Serial.printf("[%10lu] BLE disconnected: %s peer=%s\n", millis(),
@@ -603,6 +658,38 @@ bool subscribeToHidReports(ButtonSlot &button) {
   return subscribedAny;
 }
 
+void keepBleConnectionAlive(ButtonSlot &button) {
+  if (!button.client || !button.client->isConnected()) return;
+
+  const unsigned long now = millis();
+  if (now - button.lastKeepAliveMs < BLE_KEEPALIVE_MS) return;
+  button.lastKeepAliveMs = now;
+
+  NimBLERemoteService *batteryService = button.client->getService("180F");
+  if (batteryService) {
+    NimBLERemoteCharacteristic *batteryLevel =
+        batteryService->getCharacteristic("2A19");
+    if (batteryLevel && batteryLevel->canRead()) {
+      const std::string value = batteryLevel->readValue();
+      Serial.printf("[%10lu] BLE keepalive battery: %s len=%u\n", now,
+                    button.label.c_str(), static_cast<unsigned>(value.length()));
+      return;
+    }
+  }
+
+  NimBLERemoteService *hidService = button.client->getService(HID_SERVICE_UUID);
+  if (!hidService) return;
+  auto *chars = hidService->getCharacteristics(true);
+  if (!chars) return;
+  for (auto *chr : *chars) {
+    if (!chr->canRead()) continue;
+    const std::string value = chr->readValue();
+    Serial.printf("[%10lu] BLE keepalive HID: %s len=%u\n", now,
+                  button.label.c_str(), static_cast<unsigned>(value.length()));
+    return;
+  }
+}
+
 bool shouldWatchDevice(NimBLEAdvertisedDevice *device, const String &normalizedMac) {
   for (size_t i = 0; i < BUTTON_COUNT; ++i) {
     if (buttons[i].configuredMac.length() &&
@@ -656,6 +743,7 @@ public:
       if (!button.configuredMac.length()) continue;
       if (normalizedMac != button.configuredMac) continue;
       button.address = device->getAddress();
+      button.addressKnown = true;
       button.targetSeen = true;
       lastSeenSummary = button.label + ":seen";
       Serial.printf("[%10lu] BLE target seen: %s mac=%s\n", millis(),
@@ -681,7 +769,7 @@ void startBleScan() {
 
 void ensureButtonConnection(ButtonSlot &button) {
   if (!button.configuredMac.length()) return;
-  if (!button.targetSeen) return;
+  if (!button.targetSeen && !button.addressKnown) return;
   if (button.connecting) return;
   if (button.client && button.client->isConnected()) return;
 
@@ -721,9 +809,12 @@ void ensureButtonConnection(ButtonSlot &button) {
     return;
   }
 
+  button.client->updateConnParams(12, 24, 0, 400);
   logRemoteHidTopology(button);
   button.subscribed = subscribeToHidReports(button);
   button.connected = true;
+  button.addressKnown = true;
+  button.lastKeepAliveMs = millis();
   bleConnectionSummary = button.subscribed ? button.label + ":HID"
                                            : button.label + ":noN";
 
@@ -734,8 +825,17 @@ void ensureButtonConnection(ButtonSlot &button) {
 }
 
 void ensureBleConnections() {
+  bool shouldScan = false;
   for (size_t i = 0; i < BUTTON_COUNT; ++i) {
+    shouldScan = shouldScan ||
+                 (buttons[i].configuredMac.length() && !buttons[i].connected);
     ensureButtonConnection(buttons[i]);
+    keepBleConnectionAlive(buttons[i]);
+  }
+  if (shouldScan && bleScan && !bleScan->isScanning()) {
+    bleScan->start(0, nullptr, false);
+    bleScanStarted = true;
+    bleConnectionSummary = "BLE scan";
   }
 }
 
@@ -749,7 +849,7 @@ void runConfigPortal() {
   display.sendBuffer();
 
   mqttClient.disconnect();
-  WiFi.disconnect(true, true);
+  WiFi.disconnect(false, false);
   WiFi.mode(WIFI_AP_STA);
   delay(200);
 
@@ -832,6 +932,16 @@ void runConfigPortal() {
   logConfigSummary();
   lastPublishSummary = connected ? "Portal saved" : "Portal timeout";
 
+  if (connected) {
+    display.clearBuffer();
+    display.setFont(u8g2_font_5x8_tr);
+    display.drawStr(0, 12, "Portal saved");
+    display.drawStr(0, 24, "Restarting...");
+    display.sendBuffer();
+    delay(1200);
+    ESP.restart();
+  }
+
   for (size_t i = 0; i < BUTTON_COUNT; ++i) {
     if (buttons[i].client && buttons[i].client->isConnected()) {
       buttons[i].client->disconnect();
@@ -862,6 +972,26 @@ void pollPortalButton() {
     bootButtonDownMs = 0;
   }
   bootButtonWasPressed = pressed;
+}
+
+bool bootPortalHoldConfirmed() {
+  if (digitalRead(BOOT_BUTTON_PIN) != LOW) return false;
+
+  const unsigned long holdStartMs = millis();
+  display.clearBuffer();
+  display.setFont(u8g2_font_5x8_tr);
+  display.drawStr(0, 12, "Hold BOOT");
+  display.drawStr(0, 24, "4s Portal");
+  display.sendBuffer();
+
+  while (digitalRead(BOOT_BUTTON_PIN) == LOW) {
+    if (millis() - holdStartMs >= BUTTON_HOLD_FOR_PORTAL_MS) {
+      return true;
+    }
+    delay(20);
+  }
+
+  return false;
 }
 
 void reportWifi() {
@@ -923,15 +1053,14 @@ void setup() {
   Serial.printf("[%10lu] Setup: BOOT pin state=%s\n", millis(),
                 digitalRead(BOOT_BUTTON_PIN) == LOW ? "LOW" : "HIGH");
 
-  const bool forcePortalOnBoot = digitalRead(BOOT_BUTTON_PIN) == LOW;
-  if (forcePortalOnBoot) {
-    logLine("BOOT button held at startup, entering portal");
+  if (bootPortalHoldConfirmed()) {
+    logLine("BOOT button held for 4 seconds at startup, entering portal");
     runConfigPortal();
   } else {
     connectWifiBlocking();
     if (WiFi.status() != WL_CONNECTED) {
-      logLine("WiFi auto connect failed, entering portal");
-      runConfigPortal();
+      logLine("WiFi auto connect failed, staying in work mode");
+      lastPublishSummary = "WiFi retry";
     }
   }
 
@@ -952,7 +1081,7 @@ void loop() {
 
   reportWifi();
   if (WiFi.status() != WL_CONNECTED) {
-    connectWifiBlocking();
+    serviceWifiConnection();
   }
 
   if (WiFi.status() == WL_CONNECTED) {
