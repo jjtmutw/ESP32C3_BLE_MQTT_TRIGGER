@@ -21,17 +21,26 @@ const state = {
 };
 
 function mqttUrls() {
+  let urls;
   if (Array.isArray(config.MQTT_WS_URLS) && config.MQTT_WS_URLS.length) {
-    return config.MQTT_WS_URLS;
+    urls = config.MQTT_WS_URLS;
+  } else if (config.MQTT_WS_URL) {
+    urls = [config.MQTT_WS_URL];
+  } else {
+    const host = config.DEFAULT_MQTT_HOST || "broker.emqx.io";
+    urls = [
+      `wss://${host}:8084/mqtt`,
+      `wss://${host}:8084`,
+      `ws://${host}:8083/mqtt`,
+      `ws://${host}:8083`
+    ];
   }
-  if (config.MQTT_WS_URL) return [config.MQTT_WS_URL];
-  const host = config.DEFAULT_MQTT_HOST || "broker.emqx.io";
-  return [
-    `wss://${host}:8084/mqtt`,
-    `wss://${host}:8084`,
-    `ws://${host}:8083/mqtt`,
-    `ws://${host}:8083`
-  ];
+
+  if (window.location.protocol === "https:") {
+    return urls.filter((url) => url.startsWith("wss://"));
+  }
+
+  return urls;
 }
 
 function currentMqttUrl() {
